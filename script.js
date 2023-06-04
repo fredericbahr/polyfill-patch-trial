@@ -1,21 +1,69 @@
 const definitions = new Map();
+const globalDefinitionsByConstructor = new WeakMap();
 const nativeRegistry = window.customElements;
+const NativeHTMLElement = window.HTMLElement;
+let upgradeInstance;
 
 /** Web Component that is initially rendered instead of DisplayElement */
 class StandInElement extends HTMLElement {
-  constructor(tagName) {
+  constructor(newTagName) {
     super();
+    this.newTagName = newTagName;
+  }
 
-    console.log('original tag name', tagName);
-    console.log('definition', definitions.get(tagName));
+  connectedCallback() {
+    // definition should be get from registry of root node
+    // if root node does not contain registy, traverse up to next root
+    // if document is reached, use element from global definition
+    const definition = definitions.get(this.newTagName);
+    console.log('original tag name:', this.newTagName);
+    console.log('definition:', definition);
+    console.log('root node:', this.getRootNode());
 
-    const displayElement = document.createElement('display-element');
-    console.log('connected Callback of Stand In Element');
+    // customize instance to custom element
+    if (definition) {
+      try {
+        new definition.elementClass();
+      } catch {
+        patchHTMLElement(definition.elementClass);
+        new definition.elementClass();
+      }
 
-    //this.replaceWith(displayElement);
+      if (definition.connectedCallback && this.isConnected) {
+        definition.connectedCallback.call(this);
+      }
+    }
   }
 }
 window.customElements.define('stand-in-element', StandInElement);
+
+// Helper to patch CE class hierarchy changing those CE classes created before applying the polyfill
+// to make them work with the new patched CustomElementsRegistry
+const patchHTMLElement = (elementClass) => {
+  const parentClass = Object.getPrototypeOf(elementClass);
+
+  if (parentClass !== window.HTMLElement) {
+    if (parentClass === NativeHTMLElement) {
+      return Object.setPrototypeOf(elementClass, window.HTMLElement);
+    }
+
+    return patchHTMLElement(parentClass);
+  }
+};
+
+window.HTMLElement = function HTMLElement() {
+  let instance = upgradeInstance;
+  if (instance) {
+    upgradeInstance = undefined;
+    return instance;
+  }
+
+  instance = Reflect.construct(NativeHTMLElement, [], StandInElement);
+  Object.setPrototypeOf(instance, this.constructor.prototype);
+
+  return instance;
+};
+window.HTMLElement.prototype = NativeHTMLElement.prototype;
 
 window.CustomElementRegistry = class {
   constructor() {}
@@ -40,16 +88,21 @@ window.CustomElementRegistry = class {
 
     definitions.set(tagName, definition);
 
+    // only set if it is the global registry -> could be determined by attribute of class
+    globalDefinitionsByConstructor.set(elementClass, definition);
+
     const standInElement = new StandInElement();
 
-    nativeRegistry.define(
-      tagName,
-      class extends StandInElement {
-        constructor() {
-          super(tagName);
+    if (!nativeRegistry.get(tagName)) {
+      nativeRegistry.define(
+        tagName,
+        class extends StandInElement {
+          constructor() {
+            super(tagName);
+          }
         }
-      }
-    );
+      );
+    }
 
     return standInElement;
   }
@@ -67,3 +120,22 @@ class DisplayElement extends HTMLElement {
 
 const scopedRegistry = new CustomElementRegistry();
 scopedRegistry.define('display-element', DisplayElement);
+
+const wrapper = document.createElement('div');
+const shadowRoot = wrapper.attachShadow({ mode: 'open' });
+
+const diplayElement2 = document.createElement('display-element');
+shadowRoot.append(diplayElement2);
+
+const displayElement3 = document.createElement('display-element');
+
+document.body.appendChild(wrapper);
+document.body.appendChild(displayElement3);
+
+// this cannot be done, as scopedRegistry.define() calls native registry
+// provide a window.globalRegistry to define global custom elements?
+try {
+  window.customElements.define('display-element', DisplayElement);
+} catch (error) {
+  console.log(error);
+}
